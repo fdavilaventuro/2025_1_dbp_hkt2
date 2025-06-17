@@ -30,15 +30,15 @@ protectedApi.interceptors.request.use(
 );
 
 // --- Interface para la estructura de una Gasto Individual (raw data) ---
-// Esta es la estructura que esperamos del endpoint /expenses_summary (ahora sin filtros)
+// Esta es la estructura que esperamos del endpoint /expenses/detail
+// Y la usaremos para /expenses_summary (asumiendo que ahora devuelve raw expenses)
 interface RawExpense {
   id: number;
-  expenseCategory: {
+  date: string; // Changed from year/month to date string
+  category: { // Changed from expenseCategory to category
     id: number;
     name: string;
   };
-  year: number;
-  month: number;
   amount: number;
 }
 
@@ -46,7 +46,7 @@ interface RawExpense {
 // Esta es la estructura que usaremos para mostrar en la tabla de resumen
 interface ExpenseSummaryItem {
   expenseCategory: {
-    id: number; // Mantener ID para consistencia, aunque no se use directamente en el resumen por nombre
+    id: number;
     name: string;
   };
   totalAmount: number;
@@ -69,6 +69,23 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
   const [loadingExpenses, setLoadingExpenses] = useState<boolean>(false);
   const [expensesError, setExpensesError] = useState<string | null>(null);
 
+  // States for 'Detalle de gastos por categoría' tab
+  const [detailExpenses, setDetailExpenses] = useState<RawExpense[]>([]);
+  const [detailSelectedMonth, setDetailSelectedMonth] = useState<number>(new Date().getMonth() + 1);
+  const [detailSelectedYear, setDetailSelectedYear] = useState<number>(new Date().getFullYear());
+  const [detailSelectedCategoryId, setDetailSelectedCategoryId] = useState<number | ''>(''); // Allow empty string for no selection
+  const [loadingDetail, setLoadingDetail] = useState<boolean>(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+
+
+  // States for 'Registrar Gastos' tab
+  const [newExpenseAmount, setNewExpenseAmount] = useState<number | string>('');
+  const [newExpenseCategoryId, setNewExpenseCategoryId] = useState<number | ''>('');
+  const [newExpenseDate, setNewExpenseDate] = useState<string>(new Date().toISOString().slice(0, 10)); // YYYY-MM-DD
+  const [registerExpenseMessage, setRegisterExpenseMessage] = useState<string | null>(null);
+  const [registerExpenseLoading, setRegisterExpenseLoading] = useState<boolean>(false);
+
+
   // States for 'Categorías de Gastos' tab
   const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
   const [loadingCategories, setLoadingCategories] = useState<boolean>(false);
@@ -81,12 +98,15 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
     if (typeof window !== 'undefined') {
       setUserEmail(localStorage.getItem('userEmail'));
     }
-    // Fetch data for 'Categorías' tab automatically when selected
-    if (selectedTab === 'categories') {
-      fetchExpenseCategories();
+    // Fetch data for 'Categorías' tab automatically when selected or when 'Detail' tab needs them
+    if (selectedTab === 'categories' || selectedTab === 'detail' || selectedTab === 'manage') { // 'manage' tab now also needs categories
+      // Only fetch if categories are not already loaded to avoid unnecessary API calls
+      if (expenseCategories.length === 0 && !loadingCategories && !categoriesError) {
+        fetchExpenseCategories();
+      }
     }
     // Note: 'summary' data is now fetched ONLY on button click
-  }, [selectedTab]); // Re-fetch if tab changes to categories
+  }, [selectedTab]); // Re-fetch if tab changes to categories or detail needs categories
 
   const fetchExpensesSummary = async () => {
     setLoadingExpenses(true);
@@ -95,26 +115,28 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
 
     try {
       // 1. Fetch ALL expenses from the backend (no query parameters for month/year)
-      const response = await protectedApi.get<RawExpense[]>('/expenses_summary'); // Expecting RawExpense[] from backend
+      // Assuming /expenses_summary now returns RawExpense[] matching the detail format
+      const response = await protectedApi.get<RawExpense[]>('/expenses_summary');
 
       if (response.status === 200 && Array.isArray(response.data)) {
         const allExpenses: RawExpense[] = response.data;
 
         // 2. Filter by selected month and year on the frontend
-        const filteredExpenses = allExpenses.filter(expense =>
-          expense.month === selectedMonth && expense.year === selectedYear
-        );
+        const filteredExpenses = allExpenses.filter(expense => {
+          const expenseDate = new Date(expense.date);
+          return expenseDate.getMonth() + 1 === selectedMonth && expenseDate.getFullYear() === selectedYear;
+        });
 
         // 3. Aggregate by category name to get totalAmount
         const aggregatedExpenses = filteredExpenses.reduce((acc, expense) => {
-          const categoryName = expense.expenseCategory.name;
+          const categoryName = expense.category.name; // Use 'category.name'
           // Ensure expense.amount is a number before adding, handle potential NaN from backend
           const amountToAdd = typeof expense.amount === 'number' ? expense.amount : 0;
 
           if (!acc[categoryName]) {
             acc[categoryName] = {
               expenseCategory: {
-                id: expense.expenseCategory.id, // Keep category ID for potential future use
+                id: expense.category.id, // Use 'category.id'
                 name: categoryName
               },
               totalAmount: 0
@@ -180,6 +202,149 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
     }
   };
 
+  const fetchExpenseDetail = async () => {
+    setLoadingDetail(true);
+    setDetailError(null);
+    setDetailExpenses([]);
+
+    if (!detailSelectedCategoryId) {
+      setDetailError('Por favor, selecciona una categoría.');
+      setLoadingDetail(false);
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams({
+        year: detailSelectedYear.toString(),
+        month: detailSelectedMonth.toString(),
+        categoryId: detailSelectedCategoryId.toString(),
+      });
+
+      const response = await protectedApi.get<RawExpense[]>(`/expenses/detail?${params.toString()}`);
+
+      if (response.status === 200 && Array.isArray(response.data)) {
+        setDetailExpenses(response.data);
+      } else {
+        setDetailError('Formato de datos de detalle inesperado.');
+        console.error('Unexpected detail response format:', response.data);
+      }
+    } catch (err: any) {
+      if (axios.isAxiosError(err) && err.response) {
+        if (err.response.status === 401) {
+          setDetailError('No autorizado. Por favor, inicia sesión de nuevo.');
+          onLogout();
+        } else {
+          setDetailError(`Error al cargar el detalle de gastos: ${err.response.data.message || 'Error del servidor.'}`);
+        }
+      } else {
+        setDetailError('Error al conectar con el servidor para obtener el detalle de gastos.');
+      }
+      console.error('Error fetching expense detail:', err);
+    } finally {
+      setLoadingDetail(false);
+    }
+  };
+
+  const handleDeleteExpense = async (expenseId: number) => {
+    if (!window.confirm(`¿Estás seguro de que quieres eliminar el gasto con ID: ${expenseId}?`)) {
+      return; // User cancelled the deletion
+    }
+
+    setLoadingDetail(true); // Indicate loading for the detail section
+    setDetailError(null); // Clear previous errors
+
+    try {
+      const response = await protectedApi.delete(`/expenses/${expenseId}`);
+
+      if (response.status === 200) {
+        alert(`Gasto con ID ${expenseId} eliminado exitosamente.`); // Use alert for simplicity
+        fetchExpenseDetail(); // Re-fetch the detail list to update the UI
+      } else {
+        setDetailError(`Error al eliminar el gasto: Respuesta inesperada del servidor (Status: ${response.status}).`);
+      }
+    } catch (err: any) {
+      if (axios.isAxiosError(err) && err.response) {
+        if (err.response.status === 401) {
+          setDetailError('No autorizado para eliminar. Por favor, inicia sesión de nuevo.');
+          onLogout();
+        } else {
+          setDetailError(`Error al eliminar el gasto: ${err.response.data.message || 'Error del servidor.'}`);
+        }
+      } else {
+        setDetailError('Error de red al intentar eliminar el gasto.');
+      }
+      console.error('Error deleting expense:', err);
+    } finally {
+      setLoadingDetail(false);
+    }
+  };
+
+  const handleRegisterNewExpense = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegisterExpenseMessage(null);
+    setRegisterExpenseLoading(true);
+
+    if (!newExpenseAmount || !newExpenseCategoryId || !newExpenseDate) {
+      setRegisterExpenseMessage('Por favor, completa todos los campos.');
+      setRegisterExpenseLoading(false);
+      return;
+    }
+
+    // Find the full category object based on selected ID
+    const selectedCategory = expenseCategories.find(cat => cat.id === newExpenseCategoryId);
+    if (!selectedCategory) {
+      setRegisterExpenseMessage('Categoría seleccionada inválida.');
+      setRegisterExpenseLoading(false);
+      return;
+    }
+
+    try {
+      // The body structure should match what the backend expects for a new expense.
+      // Based on the RawExpense interface, it likely expects 'date', 'category' (object), and 'amount'.
+      const expenseData = {
+        date: newExpenseDate,
+        category: selectedCategory, // Send the full category object if backend expects it
+        amount: Number(newExpenseAmount), // Ensure amount is a number
+      };
+
+      // Alternative body if backend only expects categoryId:
+      // const expenseData = {
+      //   date: newExpenseDate,
+      //   categoryId: newExpenseCategoryId,
+      //   amount: Number(newExpenseAmount),
+      // };
+      // You might need to experiment with your backend to confirm which one it expects.
+
+      const response = await protectedApi.post('/expenses', expenseData);
+
+      if (response.status === 200 || response.status === 201) { // 200 OK or 201 Created
+        setRegisterExpenseMessage('¡Gasto registrado exitosamente!');
+        // Clear form fields
+        setNewExpenseAmount('');
+        setNewExpenseCategoryId('');
+        setNewExpenseDate(new Date().toISOString().slice(0, 10)); // Reset to current date
+      } else {
+        setRegisterExpenseMessage(`Error al registrar gasto: Respuesta inesperada del servidor (Status: ${response.status}).`);
+        console.error('Unexpected register expense response:', response.data);
+      }
+    } catch (err: any) {
+      if (axios.isAxiosError(err) && err.response) {
+        if (err.response.status === 401) {
+          setRegisterExpenseMessage('No autorizado para registrar. Por favor, inicia sesión de nuevo.');
+          onLogout();
+        } else {
+          setRegisterExpenseMessage(`Error al registrar gasto: ${err.response.data.message || 'Error del servidor.'}`);
+        }
+      } else {
+        setRegisterExpenseMessage('Error de red al intentar registrar el gasto.');
+      }
+      console.error('Error registering expense:', err);
+    } finally {
+      setRegisterExpenseLoading(false);
+    }
+  };
+
+
   const tabButtonClass = (tabName: string) =>
     `py-2 px-4 rounded-t-lg font-semibold transition-colors duration-200 ${selectedTab === tabName
       ? 'bg-blue-600 text-white'
@@ -202,8 +367,8 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
           Detalle por Categoría
         </button>
         <button onClick={() => setSelectedTab('manage')} className={tabButtonClass('manage')}>
-          Registrar/Eliminar
-        </button>
+          Registrar Gastos
+        </button> {/* Changed tab name */}
         <button onClick={() => setSelectedTab('categories')} className={tabButtonClass('categories')}>
           Categorías
         </button>
@@ -285,20 +450,157 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
         )}
 
         {selectedTab === 'detail' && (
-          <div className="py-8">
-            <h3 className="text-xl font-semibold text-gray-800 mb-4">Detalle de Gastos por Categoría (Próximamente)</h3>
-            <p className="text-gray-600">
-              Aquí se mostraría un desglose más detallado de los gastos, quizás con opciones de filtrado.
-            </p>
-          </div>
+          <>
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">Detalle de Gastos por Categoría</h3>
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-4">
+              <label htmlFor="detail-month-select" className="text-gray-700">Mes:</label>
+              <select
+                id="detail-month-select"
+                value={detailSelectedMonth}
+                onChange={(e) => setDetailSelectedMonth(Number(e.target.value))}
+                className="p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              >
+                {[...Array(12).keys()].map((i) => (
+                  <option key={i + 1} value={i + 1}>
+                    {new Date(0, i).toLocaleString('es-ES', { month: 'long' })}
+                  </option>
+                ))}
+              </select>
+
+              <label htmlFor="detail-year-input" className="text-gray-700">Año:</label>
+              <input
+                type="number"
+                id="detail-year-input"
+                value={detailSelectedYear}
+                onChange={(e) => setDetailSelectedYear(Number(e.target.value))}
+                className="p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 w-24"
+                min="2000"
+                max="2030"
+              />
+
+              <label htmlFor="detail-category-select" className="text-gray-700">Categoría:</label>
+              <select
+                id="detail-category-select"
+                value={detailSelectedCategoryId}
+                onChange={(e) => setDetailSelectedCategoryId(Number(e.target.value) || '')}
+                className="p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="">Selecciona una categoría</option>
+                {expenseCategories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={fetchExpenseDetail}
+                className="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 font-semibold shadow-md"
+                disabled={loadingDetail}
+              >
+                {loadingDetail ? 'Cargando...' : 'Ver Detalle'}
+              </button>
+            </div>
+
+            {loadingDetail ? (
+              <p className="text-gray-600">Cargando detalle de gastos...</p>
+            ) : detailError ? (
+              <p className="text-red-500">{detailError}</p>
+            ) : detailExpenses.length > 0 ? (
+              <div className="overflow-x-auto rounded-md border border-gray-200">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-100">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Gasto</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fecha</th> {/* Changed to Fecha */}
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Categoría</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Monto</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Acciones</th> {/* New column for actions */}
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {detailExpenses.map((expense) => (
+                      <tr key={expense.id}>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{expense.id}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{expense.date}</td> {/* Using date directly */}
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{expense.category.name}</td> {/* Using category.name */}
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">${expense.amount?.toFixed(2)}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <button
+                            onClick={() => handleDeleteExpense(expense.id)}
+                            className="text-red-600 hover:text-red-900 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-opacity-50 transition duration-150 ease-in-out font-semibold text-sm rounded-md border border-red-600 px-3 py-1 hover:bg-red-50"
+                          >
+                            Eliminar
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-gray-600">No hay datos de gastos detallados para los filtros seleccionados.</p>
+            )}
+          </>
         )}
 
         {selectedTab === 'manage' && (
           <div className="py-8">
-            <h3 className="text-xl font-semibold text-gray-800 mb-4">Registrar y Eliminar Gastos (Próximamente)</h3>
-            <p className="text-gray-600">
-              Esta sección contendría formularios para añadir nuevos gastos y herramientas para eliminar los existentes.
-            </p>
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">Registrar Gastos</h3> {/* Changed heading */}
+            <form onSubmit={handleRegisterNewExpense} className="space-y-4">
+              <div>
+                <label htmlFor="newExpenseAmount" className="block text-gray-700 text-sm font-medium mb-2">Monto:</label>
+                <input
+                  type="number"
+                  id="newExpenseAmount"
+                  value={newExpenseAmount}
+                  onChange={(e) => setNewExpenseAmount(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                  placeholder="Ej: 123.45"
+                  step="0.01"
+                  required
+                />
+              </div>
+              <div>
+                <label htmlFor="newExpenseCategory" className="block text-gray-700 text-sm font-medium mb-2">Categoría:</label>
+                <select
+                  id="newExpenseCategory"
+                  value={newExpenseCategoryId}
+                  onChange={(e) => setNewExpenseCategoryId(Number(e.target.value) || '')}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                  required
+                >
+                  <option value="">Selecciona una categoría</option>
+                  {expenseCategories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label htmlFor="newExpenseDate" className="block text-gray-700 text-sm font-medium mb-2">Fecha:</label>
+                <input
+                  type="date"
+                  id="newExpenseDate"
+                  value={newExpenseDate}
+                  onChange={(e) => setNewExpenseDate(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                  required
+                />
+              </div>
+              <button
+                type="submit"
+                className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 font-semibold shadow-md"
+                disabled={registerExpenseLoading}
+              >
+                {registerExpenseLoading ? 'Registrando...' : 'Registrar Gasto'}
+              </button>
+            </form>
+            {registerExpenseMessage && (
+              <p className={`mt-4 text-sm ${registerExpenseMessage.includes('exitosamente') ? 'text-green-600' : 'text-red-500'}`}>
+                {registerExpenseMessage}
+              </p>
+            )}
           </div>
         )}
 
@@ -419,7 +721,7 @@ const LoginForm = ({ onRegisterClick, onLoginSuccess }: LoginFormProps) => {
           setMessage(`Error del servidor: ${error.response.data.message || 'Inténtalo de nuevo más tarde.'}`);
         }
       } else {
-        setMessage('Error al intentar conectar con el servidor. Asegúrate de que el backend esté funcionando.');
+        setMessage('Error al intentar conectar con el servidor.');
       }
       console.error('Login error:', error);
     } finally {
