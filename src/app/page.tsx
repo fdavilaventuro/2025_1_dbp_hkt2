@@ -1,6 +1,6 @@
 'use client'; // This directive is necessary for client-side functionality in Next.js 13+ App Router
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import axios from 'axios'; // Import axios for making API requests
 
 // Define a simple API instance for protected calls
@@ -34,11 +34,12 @@ protectedApi.interceptors.request.use(
 // Y la usaremos para /expenses_summary (asumiendo que ahora devuelve raw expenses)
 interface RawExpense {
   id: number;
-  date: string; // Changed from year/month to date string
-  category: { // Changed from expenseCategory to category
+  expenseCategory: { // Propiedad 'expenseCategory' (no solo 'category')
     id: number;
     name: string;
   };
+  year: number; // Campo 'year'
+  month: number; // Campo 'month'
   amount: number;
 }
 
@@ -58,6 +59,21 @@ interface ExpenseCategory {
   name: string;
 }
 
+// --- Interface para la estructura de una Gasto Individual RECIBIDA para el DETALLE (GET /expenses/detail) ---
+// Esta estructura tiene 'date' y 'category'
+interface DetailRawExpense {
+  id: number;
+  date: string; // The date string (YYYY-MM-DD)
+  category: {   // The category object (name 'category')
+    id: number;
+    name: string;
+  };
+  amount: number;
+}
+
+// Define SortDirection type
+type SortDirection = 'asc' | 'desc' | null;
+
 // --- Componente Dashboard (Contenido Protegido) ---
 const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -69,14 +85,21 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
   const [loadingExpenses, setLoadingExpenses] = useState<boolean>(false);
   const [expensesError, setExpensesError] = useState<string | null>(null);
 
+  // States for sorting
+  const [sortColumnSummary, setSortColumnSummary] = useState<'categoryName' | 'totalAmount' | null>(null);
+  const [sortDirectionSummary, setSortDirectionSummary] = useState<SortDirection>(null);
+
   // States for 'Detalle de gastos por categoría' tab
-  const [detailExpenses, setDetailExpenses] = useState<RawExpense[]>([]);
+  const [detailExpenses, setDetailExpenses] = useState<DetailRawExpense[]>([]);
   const [detailSelectedMonth, setDetailSelectedMonth] = useState<number>(new Date().getMonth() + 1);
   const [detailSelectedYear, setDetailSelectedYear] = useState<number>(new Date().getFullYear());
   const [detailSelectedCategoryId, setDetailSelectedCategoryId] = useState<number | ''>(''); // Allow empty string for no selection
   const [loadingDetail, setLoadingDetail] = useState<boolean>(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
+  // Sorting states for DetailRawExpense table
+  const [sortColumn, setSortColumn] = useState<keyof DetailRawExpense | 'categoryName' | null>(null); // Added 'categoryName' for nested property
+  const [sortDirection, setSortDirection] = useState<SortDirection>(null);
 
   // States for 'Registrar Gastos' tab
   const [newExpenseAmount, setNewExpenseAmount] = useState<number | string>('');
@@ -122,21 +145,20 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
         const allExpenses: RawExpense[] = response.data;
 
         // 2. Filter by selected month and year on the frontend
-        const filteredExpenses = allExpenses.filter(expense => {
-          const expenseDate = new Date(expense.date);
-          return expenseDate.getMonth() + 1 === selectedMonth && expenseDate.getFullYear() === selectedYear;
-        });
+        const filteredExpenses = allExpenses.filter(expense =>
+          expense.month === selectedMonth && expense.year === selectedYear
+        );
 
         // 3. Aggregate by category name to get totalAmount
         const aggregatedExpenses = filteredExpenses.reduce((acc, expense) => {
-          const categoryName = expense.category.name; // Use 'category.name'
+          const categoryName = expense.expenseCategory.name; // Use 'category.name'
           // Ensure expense.amount is a number before adding, handle potential NaN from backend
           const amountToAdd = typeof expense.amount === 'number' ? expense.amount : 0;
 
           if (!acc[categoryName]) {
             acc[categoryName] = {
               expenseCategory: {
-                id: expense.category.id, // Use 'category.id'
+                id: expense.expenseCategory.id, // Use 'category.id'
                 name: categoryName
               },
               totalAmount: 0
@@ -150,6 +172,9 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
         const summaryArray: ExpenseSummaryItem[] = Object.values(aggregatedExpenses);
 
         setExpensesSummary(summaryArray);
+        // Reset summary sorting when new data is fetched
+        setSortColumnSummary(null);
+        setSortDirectionSummary(null);
       } else {
         setExpensesError('Formato de datos de resumen inesperado.');
         console.error('Unexpected response format:', response.data);
@@ -202,12 +227,15 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
     }
   };
 
-  const fetchExpenseDetail = async () => {
+  const fetchExpenseDetail = async (categoryIdFromButton?: number) => {
     setLoadingDetail(true);
     setDetailError(null);
     setDetailExpenses([]);
 
-    if (!detailSelectedCategoryId) {
+    // Use the ID passed as an argument, or fall back to state
+    const categoryIdToUse = categoryIdFromButton !== undefined ? categoryIdFromButton : detailSelectedCategoryId;
+
+    if (!categoryIdToUse) { // Check the resolved ID
       setDetailError('Por favor, selecciona una categoría.');
       setLoadingDetail(false);
       return;
@@ -217,13 +245,16 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
       const params = new URLSearchParams({
         year: detailSelectedYear.toString(),
         month: detailSelectedMonth.toString(),
-        categoryId: detailSelectedCategoryId.toString(),
+        categoryId: categoryIdToUse.toString(),
       });
 
-      const response = await protectedApi.get<RawExpense[]>(`/expenses/detail?${params.toString()}`);
+      const response = await protectedApi.get<DetailRawExpense[]>(`/expenses/detail?${params.toString()}`);
 
       if (response.status === 200 && Array.isArray(response.data)) {
         setDetailExpenses(response.data);
+        // Reset sorting when new data is fetched
+        setSortColumn(null);
+        setSortDirection(null);
       } else {
         setDetailError('Formato de datos de detalle inesperado.');
         console.error('Unexpected detail response format:', response.data);
@@ -307,14 +338,6 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
         amount: Number(newExpenseAmount), // Ensure amount is a number
       };
 
-      // Alternative body if backend only expects categoryId:
-      // const expenseData = {
-      //   date: newExpenseDate,
-      //   categoryId: newExpenseCategoryId,
-      //   amount: Number(newExpenseAmount),
-      // };
-      // You might need to experiment with your backend to confirm which one it expects.
-
       const response = await protectedApi.post('/expenses', expenseData);
 
       if (response.status === 200 || response.status === 201) { // 200 OK or 201 Created
@@ -344,12 +367,157 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
     }
   };
 
+  // New function to handle "Nuevo" button click from Categories tab
+  const handleNewExpenseFromCategory = (categoryId: number) => {
+    setNewExpenseCategoryId(categoryId);
+    setSelectedTab('manage'); // Switch to "Registrar Gastos" tab
+  };
+
+  const handleViewDetailFromCategory = (categoryId: number) => {
+    setDetailSelectedCategoryId(categoryId); // Still update state for dropdown persistence
+    setDetailSelectedMonth(new Date().getMonth() + 1);
+    setDetailSelectedYear(new Date().getFullYear());
+    setSelectedTab('detail');
+    // Directly pass the categoryId to fetchExpenseDetail. The setTimeout is removed.
+    fetchExpenseDetail(categoryId);
+  };
+
+  // Handle sorting for DetailRawExpense table
+  const handleSort = (column: keyof DetailRawExpense | 'categoryName') => {
+    if (sortColumn === column) {
+      // If already sorting by this column, toggle direction or reset
+      setSortDirection(prev => {
+        if (prev === 'asc') return 'desc';
+        if (prev === 'desc') return null; // Reset sort
+        return 'asc';
+      });
+    } else {
+      // Start sorting by a new column in ascending order
+      setSortColumn(column);
+      setSortDirection('asc');
+    }
+  };
+
+  // Handle sorting for ExpenseSummaryItem table (Resumen de Gastos)
+  const handleSortSummary = (column: 'categoryName' | 'totalAmount') => {
+    if (sortColumnSummary === column) {
+      setSortDirectionSummary(prev => {
+        if (prev === 'asc') return 'desc';
+        if (prev === 'desc') return null; // Reset sort
+        return 'asc';
+      });
+    } else {
+      setSortColumnSummary(column);
+      setSortDirectionSummary('asc');
+    }
+  };
+
+  // Memoize the sorted expenses to prevent re-sorting on every render
+  const sortedDetailExpenses = useMemo(() => {
+    if (!sortColumn || !sortDirection) {
+      return detailExpenses; // No sorting applied
+    }
+
+    // Create a shallow copy to avoid mutating the original state
+    const sortableExpenses = [...detailExpenses];
+
+    return sortableExpenses.sort((a, b) => {
+      let valA: any;
+      let valB: any;
+
+      if (sortColumn === 'categoryName') { // Handle nested category name
+        valA = a.category.name.toLowerCase();
+        valB = b.category.name.toLowerCase();
+      } else if (sortColumn === 'date') {
+        // For date, parse them to Date objects for accurate comparison
+        valA = new Date(a.date);
+        valB = new Date(b.date);
+      } else {
+        // For 'id' and 'amount', directly use the values
+        // Ensure to cast to 'any' or check type for direct access
+        valA = (a as any)[sortColumn];
+        valB = (b as any)[sortColumn];
+      }
+
+      if (valA < valB) {
+        return sortDirection === 'asc' ? -1 : 1;
+      }
+      if (valA > valB) {
+        return sortDirection === 'asc' ? 1 : -1;
+      }
+      return 0; // Values are equal
+    });
+  }, [detailExpenses, sortColumn, sortDirection]);
+
+  // Memoize the sorted expenses summary to prevent re-sorting on every render
+  const sortedExpensesSummary = useMemo(() => {
+    if (!sortColumnSummary || !sortDirectionSummary) {
+      return expensesSummary; // No sorting applied
+    }
+
+    const sortableSummary = [...expensesSummary];
+
+    return sortableSummary.sort((a, b) => {
+      let valA: any;
+      let valB: any;
+
+      if (sortColumnSummary === 'categoryName') {
+        valA = a.expenseCategory.name.toLowerCase();
+        valB = b.expenseCategory.name.toLowerCase();
+      } else if (sortColumnSummary === 'totalAmount') {
+        valA = a.totalAmount;
+        valB = b.totalAmount;
+      }
+
+      if (valA < valB) {
+        return sortDirectionSummary === 'asc' ? -1 : 1;
+      }
+      if (valA > valB) {
+        return sortDirectionSummary === 'asc' ? 1 : -1;
+      }
+      return 0;
+    });
+  }, [expensesSummary, sortColumnSummary, sortDirectionSummary]);
+
+  // Memoize sorted categories for the "Categorías" tab and dropdowns
+  const sortedExpenseCategories = useMemo(() => {
+    // Create a shallow copy to avoid mutating the original state
+    const sortableCategories = [...expenseCategories];
+    return sortableCategories.sort((a, b) => a.name.localeCompare(b.name));
+  }, [expenseCategories]); // Re-sort only when expenseCategories changes
 
   const tabButtonClass = (tabName: string) =>
     `py-2 px-4 rounded-t-lg font-semibold transition-colors duration-200 ${selectedTab === tabName
       ? 'bg-blue-600 text-white'
       : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
     }`;
+
+  // Helper to render sort icon
+  const renderSortIcon = (column: keyof DetailRawExpense | 'categoryName' | 'totalAmount') => { // Updated type to include 'totalAmount'
+    // Determine which sort state to use (detail or summary)
+    const isDetailColumn = ['id', 'date', 'amount'].includes(column as string); // 'category' can be both but we handle it separately via 'categoryName' string
+    const isCategoryNameColumn = column === 'categoryName';
+    const isTotalAmountColumn = column === 'totalAmount';
+
+    if (isDetailColumn || isCategoryNameColumn) { // Check for detail table sorting
+      if (sortColumn === column) {
+        if (sortDirection === 'asc') {
+          return <span className="ml-1">▲</span>;
+        } else if (sortDirection === 'desc') {
+          return <span className="ml-1">▼</span>;
+        }
+      }
+    } else if (isTotalAmountColumn) { // Check for summary table sorting (only totalAmount here)
+      if (sortColumnSummary === column) {
+        if (sortDirectionSummary === 'asc') {
+          return <span className="ml-1">▲</span>;
+        } else if (sortDirectionSummary === 'desc') {
+          return <span className="ml-1">▼</span>;
+        }
+      }
+    }
+    return null; // No icon if not sorted by this column or no direction
+  };
 
   return (
     <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-4xl text-center flex flex-col gap-8">
@@ -423,14 +591,24 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
             ) : expensesSummary.length > 0 ? (
               <div className="overflow-x-auto rounded-md border border-gray-200">
                 <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-100">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Categoría</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Gastado</th>
+                  <thead>
+                    <tr className="bg-gray-100">
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        <button onClick={() => handleSortSummary('categoryName')} className="flex items-center group focus:outline-none focus:text-blue-600">
+                          Categoría
+                          {renderSortIcon('categoryName')}
+                        </button>
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        <button onClick={() => handleSortSummary('totalAmount')} className="flex items-center group focus:outline-none focus:text-blue-600">
+                          Total Gastado
+                          {renderSortIcon('totalAmount')}
+                        </button>
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {expensesSummary.map((item, index) => (
+                    {sortedExpensesSummary.map((item, index) => (
                       <tr key={index}>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
                           {item.expenseCategory.name}
@@ -486,14 +664,14 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
                 className="p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
               >
                 <option value="">Selecciona una categoría</option>
-                {expenseCategories.map((category) => (
+                {sortedExpenseCategories.map((category) => (
                   <option key={category.id} value={category.id}>
                     {category.name}
                   </option>
                 ))}
               </select>
               <button
-                onClick={fetchExpenseDetail}
+                onClick={() => fetchExpenseDetail()} // Wrapped in an arrow function to explicitly call without args
                 className="bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 font-semibold shadow-md"
                 disabled={loadingDetail}
               >
@@ -510,19 +688,36 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-100">
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Gasto</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Fecha</th> {/* Changed to Fecha */}
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Categoría</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Monto</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Acciones</th> {/* New column for actions */}
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        <button onClick={() => handleSort('id')} className="flex items-center group focus:outline-none focus:text-blue-600">
+                          ID Gasto
+                          {renderSortIcon('id')}
+                        </button>
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        <button onClick={() => handleSort('date')} className="flex items-center group focus:outline-none focus:text-blue-600">
+                          Fecha
+                          {renderSortIcon('date')}
+                        </button>
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Categoría
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        <button onClick={() => handleSort('amount')} className="flex items-center group focus:outline-none focus:text-blue-600">
+                          Monto
+                          {renderSortIcon('amount')}
+                        </button>
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {detailExpenses.map((expense) => (
+                    {sortedDetailExpenses.map((expense) => (
                       <tr key={expense.id}>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{expense.id}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{expense.date}</td> {/* Using date directly */}
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{expense.category.name}</td> {/* Using category.name */}
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{expense.date}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{expense.category.name}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">${expense.amount?.toFixed(2)}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                           <button
@@ -570,7 +765,7 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
                   required
                 >
                   <option value="">Selecciona una categoría</option>
-                  {expenseCategories.map((category) => (
+                  {sortedExpenseCategories.map((category) => (
                     <option key={category.id} value={category.id}>
                       {category.name}
                     </option>
@@ -614,20 +809,31 @@ const Dashboard = ({ onLogout }: { onLogout: () => void }) => {
             ) : expenseCategories.length > 0 ? (
               <div className="overflow-x-auto rounded-md border border-gray-200">
                 <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-100">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                  <thead>
+                    <tr className="bg-gray-100">
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nombre de Categoría</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Acciones</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {expenseCategories.map((category) => (
+                    {sortedExpenseCategories.map((category) => (
                       <tr key={category.id}>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                          {category.id}
-                        </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
                           {category.name}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-left text-sm font-medium flex gap-2">
+                          <button
+                            onClick={() => handleNewExpenseFromCategory(category.id)}
+                            className="bg-green-500 text-white py-1 px-3 rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50 text-xs shadow-sm"
+                          >
+                            Nuevo
+                          </button>
+                          <button
+                            onClick={() => handleViewDetailFromCategory(category.id)}
+                            className="bg-blue-500 text-white py-1 px-3 rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 text-xs shadow-sm"
+                          >
+                            Ver
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -973,10 +1179,10 @@ export default function Home() {
             {view === 'landing' && (
               <div className="flex flex-col items-center">
                 <h1 className="text-4xl sm:text-5xl font-bold text-gray-900 mb-4">
-                  ¡Bienvenido a Nuestra Aplicación de Base de Datos!
+                  ¡Bienvenido a Ahorrista!
                 </h1>
                 <p className="text-lg text-gray-600 mb-8 max-w-prose">
-                  Gestiona tus datos de forma eficiente y segura. Inicia sesión para acceder a tu panel o regístrate para empezar.
+                  Gestiona tus gastos de forma eficiente y segura. Inicia sesión para acceder a tu panel o regístrate para empezar.
                 </p>
                 <div className="flex gap-4">
                   <button
