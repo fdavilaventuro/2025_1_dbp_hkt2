@@ -166,3 +166,11 @@ Se evaluará:
 ---
 
 ¡Buena suerte, y que gane el equipo más eficiente y elegante! 🚀
+
+## Integrantes
+
+- Efrén Paolo Centeno Rosas
+- Fabio Eduardo Dávila Venturo  
+- Darlene Priyanka Escobar Hinojosa
+- Letizia Estefanía Torres Mariño
+- Eliseo David Velasquez Diaz  
